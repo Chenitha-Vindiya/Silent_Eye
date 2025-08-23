@@ -1,4 +1,6 @@
 #include <DHT.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 
 #define DHTPIN 25
 #define DHTTYPE DHT22
@@ -20,6 +22,19 @@ void setup() {
   digitalWrite(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   dht.begin();
+}
+
+void sendSensorData(float temp, int gasLevel) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin("http://localhost:5000/api/sensor"); // Replace with backend URL
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{\"temperature\":" + String(temp, 1) + ",\"gas\":" + String(gasLevel) + "}";
+    int httpResponseCode = http.POST(payload);
+
+    http.end();
+  }
 }
 
 void loop() {
