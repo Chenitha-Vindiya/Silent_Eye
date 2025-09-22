@@ -1,37 +1,3 @@
-/**
- * Silent Eye V1.0 - ESP32 Home Security System (Enhanced)
- * 
- * Features:
- * - Motion detection (2x PIR sensors + Laser/LDR)
- * - Environmental monitoring (DHT22 temp/humidity, MQ-2 gas)
- * - Access control (Keypad + RFID)
- * - Real-time clock (DS3231)
- * - LCD display with cycling pages
- * - WiFi connectivity with Blynk integration
- * - Window monitoring (limit switch)
- * - Automatic alerts and relay control
- * - Data logging to SD card
- * - Email/SMS alerts via IFTTT
- * - Alarm system with buzzer
- * - Emergency mode
- * 
- * Hardware Requirements:
- * - ESP32 DevKit
- * - DHT22 sensor (GPIO 25)
- * - MQ-2 gas sensor (GPIO 35)
- * - 2x PIR sensors (GPIO 26, 4)
- * - LDR + Laser module (GPIO 34)
- * - DS3231 RTC (I2C)
- * - 16x2 LCD with I2C (address 0x27)
- * - 4x4 Keypad via PCF8574 (I2C address 0x20)
- * - MFRC522 RFID reader (SPI)
- * - Relay module (GPIO 27)
- * - Limit switch (GPIO 33)
- * - LED indicator (GPIO 13)
- * - Buzzer (GPIO 32)
- * - SD Card Module (optional - GPIO 5)
- */
-
 // #define BLYNK_TEMPLATE_ID           "TMPL6pLUFnhEn"
 // #define BLYNK_TEMPLATE_NAME         "Quickstart Template"
 // #define BLYNK_AUTH_TOKEN            "04Q0xlBXm140X4lF7SW-pBYM-AaRgDdH"
