@@ -4,14 +4,62 @@
 
 #include <WiFi.h>
 #include <WiFiClient.h>
-// #include <BlynkSimpleEsp32.h>  // Blynk Library
+//#include <BlynkSimpleEsp32.h>  // Blynk Library
 #include <HTTPClient.h>
-#include <DHT.h>
+#include <DHT.h> //DHT22
 #include <Wire.h>
-#include "RTClib.h"
-#include <Keypad_I2C.h>
-#include <Keypad.h>
-#include <LiquidCrystal_I2C.h>
+#include "RTClib.h" //RTC
+#include <Keypad_I2C.h> //Keypad I2C
+#include <Keypad.h> //Keypad
+#include <LiquidCrystal_I2C.h> //LCD Display I2C
+#include <SPI.h>
+#include <MFRC522.h> //RFID
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+class NonBlockingTimer {
+  unsigned long interval;
+  unsigned long previousMillis;
+  bool runningFlag;
+
+public:
+  NonBlockingTimer() : interval(0), previousMillis(0), runningFlag(false) {}
+
+  void start(unsigned long ms) {
+    interval = ms;
+    previousMillis = millis();
+    runningFlag = true;
+  }
+
+  bool isDone() {
+    if (!runningFlag) return true;  // allow immediate first run
+    if (millis() - previousMillis >= interval) {
+      previousMillis = millis();    // reset timer
+      return true;
+    }
+    return false;
+  }
+
+  void reset() {
+    runningFlag = false;
+  }
+};
+
+// ----- Declare timers globally-----
+NonBlockingTimer printTimer;   // Timer for displayValues()
+NonBlockingTimer ledTimer;     // Timer for LED blinking
+NonBlockingTimer relayTimer;   // Timer for relay activation
+NonBlockingTimer lcdTimer;   // Timer for LCD updates
+
+unsigned long ledOnTime = 500;   // LED ON duration (ms)
+unsigned long ledOffTime = 500;  // LED OFF duration (ms)
+bool ledState = false;           // LED state
+
+bool relayState = false;
+
+String motionStatus = "";
+String tempAlert = "";
+String gasAlert = "";
+
 
 // const char ssid[] = "Chenitha";
 // const char password[] = "Cheni@20050630";
@@ -28,14 +76,19 @@ DHT dht(DHTPIN, DHTTYPE);
 // Create LCD object at I2C address 0x27 (common) with 16 chars & 2 lines
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
+
 #define MQ2_PIN 35
 #define PIR_1_PIN 26
-#define PIR_2_PIN 19
+#define PIR_2_PIN 4
 #define LDR_PIN 34
 #define LED_PIN 13
 #define LIMIT_SWITCH 33
 #define SDA 21
 #define SCL 22
+#define RELAY_PIN 27
+
+#define RFID_SDA 17 //RFID SDA
+#define RST_PIN 16 //RFID RST
 
 #define MANUAL_TRIGGER_VPIN V4
 
@@ -46,15 +99,13 @@ const float TEMP_THRESHOLD = 36.0;
 const int GAS_THRESHOLD = 1500;
 const int CLOSE_TIME = 19;
 
-unsigned long ledTimer = 0;
-bool ledState = false;
-const unsigned long ledOnTime = 300;  // LED ON duration
-const unsigned long ledOffTime = 100; // LED OFF duration
-
-unsigned long lastPrint = 0;
-const unsigned long printInterval = 1000;
+String enteredPassword = "";
+String correctPassword = "1234";
 
 #define I2CADDR 0x20  // PCF8574 default if A0,A1,A2 = GND
+
+// Create RTC object
+MFRC522 rfid(RFID_SDA, RST_PIN);
 
 const byte ROWS = 4;
 const byte COLS = 4;
@@ -74,7 +125,6 @@ byte colPins[COLS] = {4, 5, 6, 7}; // P4–P7
 // Create keypad instance
 Keypad_I2C customKeypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS, I2CADDR, 1, &Wire);
 
-
 String camIP = "http://192.168.8.105/";  // Replace with ESP32-CAM IP
 
 // BLYNK_WRITE(MANUAL_TRIGGER_VPIN) {
@@ -87,6 +137,9 @@ String camIP = "http://192.168.8.105/";  // Replace with ESP32-CAM IP
 //   }
 // }
 
+
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200); //Starting Serial Communication
   Wire.begin(SDA, SCL);
@@ -104,17 +157,21 @@ void setup() {
   delay(1500);
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Starting System!");
-  delay(1500);
-  lcd.clear();
-  lcd.setCursor(0, 0);
   
   pinMode(PIR_1_PIN, INPUT);
   pinMode(PIR_2_PIN, INPUT);
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(LIMIT_SWITCH, INPUT_PULLUP); //Limit_Switch 3V3 - GPIO33
 
+  pinMode(LIMIT_SWITCH, INPUT_PULLUP); //Limit_Switch GND - GPIO33
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); // Keep relay OFF at start
+  
+  pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW); //keep Lights off start of the system
+
+  printTimer.start(1000);       // print every 1s
+  ledTimer.start(ledOnTime);    // LED blinking interval
+  lcdTimer.start(1000);         // update LCD every 1s
   
   // WiFi.begin(ssid, password);
 
@@ -161,6 +218,10 @@ void setup() {
     }
   }
   if(count==0) Serial.println("No I2C devices found");
+
+  //RDID Initialization
+  SPI.begin();           // Init SPI bus
+  rfid.PCD_Init();       // Init RC522
 }
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -177,7 +238,6 @@ String twoDigits(int value) {
   return String(value);
 }
 
-
 //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void loop() {
   int pirOneState = digitalRead(PIR_1_PIN); //Store PIR 1 Value
@@ -193,14 +253,40 @@ void loop() {
   int gasLevel = analogRead(MQ2_PIN);
 
   bool triggered = false;
-  unsigned long currentMillis = millis();
 
   DateTime now = rtc.now(); //store Date & Time
-
+  
   char key = customKeypad.getKey();
   if (key) {
     Serial.print("Key Pressed: ");
     Serial.println(key);
+
+    if (key == '#') {  // # = Enter
+      if (enteredPassword == correctPassword) {
+        Serial.println("Access Granted");
+        digitalWrite(RELAY_PIN, HIGH);   // Turn ON relay
+        relayState = true;
+        relayTimer.start(3000);          // keep unlocked for 3 sec
+      } else {
+        Serial.println("Access Denied");
+        relayState = false;
+      }
+      enteredPassword = ""; // reset input
+    } 
+    else if (key == '*') {  // * = Clear
+      enteredPassword = "";
+      Serial.println("Input cleared");
+    } 
+    else {
+      enteredPassword += key; // add digit to input
+    }
+  }
+
+  // Turn off relay when timer expires
+  if (relayState && relayTimer.isDone()) {
+      digitalWrite(RELAY_PIN, LOW);
+      relayState = false;
+      relayTimer.reset();
   }
 
   // //communicating with esp32 cam
@@ -233,6 +319,86 @@ void loop() {
   //   delay(3000);
   // }
 
+
+  // Check for new RFID card
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+      String content = "";
+      for (byte i = 0; i < rfid.uid.size; i++) {
+          content += (rfid.uid.uidByte[i] < 0x10 ? "0" : "") + String(rfid.uid.uidByte[i], HEX);
+      }
+      content.toUpperCase();
+      Serial.println("RFID: " + content);
+
+      if (content == "E993D505") {  
+          Serial.println("Access Granted by RFID");
+          digitalWrite(RELAY_PIN, HIGH);   // Turn ON relay
+          relayState = true;
+          relayTimer.start(3000);          // 3-second timer
+      } else {
+          Serial.println("Access Denied");
+          relayState = false;
+      }
+
+    //Release
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+
+  // Turn off relay when timer expires
+  if (relayState && relayTimer.isDone()) {
+      digitalWrite(RELAY_PIN, LOW);
+      relayState = false;
+      relayTimer.reset();
+  }
+
+
+  // checkTriggersAndControlLed(
+  //     limitSwitchValue,
+  //     pirOneState,
+  //     pirTwoState,
+  //     ldrValue,
+  //     temp,
+  //     gasLevel,
+  //     humidity,
+  //     triggered,
+  //     ledState,
+  //     ledTimer,
+  //     ledOnTime,
+  //     ledOffTime
+  // );
+
+  // Print all info in one line
+  if (printTimer.isDone()) {
+      displayValues(humidity, temp, gasLevel, limitSwitchValue, pirOneState, pirTwoState, ldrValue);
+  }
+  
+  // LCD Print
+  if (lcdTimer.isDone()) {
+      updateLcdPages(limitSwitchValue, temp, humidity, gasLevel, now);
+  }
+
+  // Blynk.run();
+}
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+void checkTriggersAndControlLed(
+  int limitSwitchValue,
+  int pirOneState,
+  int pirTwoState,
+  int ldrValue,
+  float temp,
+  int gasLevel,
+  float humidity,
+  bool &triggered,
+  bool &ledState,
+  NonBlockingTimer &ledTimer,
+  unsigned long ledOnTime,
+  unsigned long ledOffTime
+) {
+
+  DateTime now = rtc.now();
+  // Reset trigger flag
+  triggered = false;
   //Check window open or close using Limit_Switch Value
   if(limitSwitchValue == HIGH) {
     if(now.hour()>=CLOSE_TIME) {
@@ -255,38 +421,28 @@ void loop() {
     triggered = true; 
   }
 
-  // Print all info in one line
-  if(currentMillis - lastPrint >= printInterval){
-    displayValues(humidity, temp, gasLevel, limitSwitchValue, pirOneState, pirTwoState, ldrValue);
-    lastPrint = currentMillis;
-  }
-
   //For trigger alert with ON and OFF times
   if(triggered) {
-    if(ledState) {
-      // LED is currently ON → check if ON time has passed
-      if(currentMillis - ledTimer >= ledOnTime) {
-          digitalWrite(LED_PIN, LOW);  // Turn LED OFF
-          ledState = false;            // Update state
-          ledTimer = currentMillis;    // Reset timer for OFF duration
+      if(ledState) {
+          if(ledTimer.isDone()) {  // LED ON duration finished
+              digitalWrite(LED_PIN, LOW);
+              ledState = false;
+              ledTimer.start(ledOffTime); // start OFF duration
+          }
+      } else {
+          if(ledTimer.isDone()) {  // LED OFF duration finished
+              digitalWrite(LED_PIN, HIGH);
+              ledState = true;
+              ledTimer.start(ledOnTime); // start ON duration
+          }
       }
-    } else {
-      // LED is currently OFF → check if OFF time has passed
-      if(currentMillis - ledTimer >= ledOffTime) {
-          digitalWrite(LED_PIN, HIGH); // Turn LED ON
-          ledState = true;             // Update state
-          ledTimer = currentMillis;    // Reset timer for ON duration
-      }
-    }
   } else {
-    // No trigger
-    digitalWrite(LED_PIN, LOW);
-    ledState = false;
+      digitalWrite(LED_PIN, LOW);
+      ledState = false;
+      ledTimer.reset();  // stop LED timer
   }
-
-  // Blynk.run();
-
 }
+
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void displayValues(float humidity, float temp, float gasLevel, int limitSwitchValue, int pirOneState, int pirTwoState, int ldrValue) {
@@ -314,7 +470,7 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
     Serial.print("Window Closed | ");
   }
 
-  String motionStatus = "";
+    motionStatus = "";
   if (pirOneState == HIGH) motionStatus += "#1 PIR";
 
   if (pirTwoState == HIGH) {
@@ -329,16 +485,12 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
 
   if (motionStatus.length() == 0) motionStatus = "No motion";
 
-  if (isnan(humidity) || isnan(temp)) {
-    Serial.println("Failed to read from DHT sensor!"); //if DHT22 sensor output's not a number (nan) print sensor failure message
-  }
-
-  String tempAlert = "";
+  tempAlert = "";
   if (!isnan(temp) && temp > TEMP_THRESHOLD) {
     tempAlert = "Temp High! ";
   }
 
-  String gasAlert = "";
+  gasAlert = "";
   if (gasLevel > GAS_THRESHOLD){
     gasAlert = "Gas High! ";
   }
@@ -346,6 +498,7 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
   // Print all info in one line
   Serial.print("Motion: ");
   Serial.print(motionStatus);
+  if (isnan(humidity) || isnan(temp)) Serial.print(" | Failed to read from DHT sensor!"); //if DHT22 sensor output's not a number (nan) print sensor failure message
   Serial.print(" | Humidity: ");
   if (isnan(humidity)) Serial.print("Err");
   else Serial.print(humidity, 1);
@@ -360,8 +513,11 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
   Serial.print(" PPM ");
   Serial.print(gasAlert);
   Serial.println("");
+}
 
-    // === LCD Output (paged display) ===
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+void updateLcdPages(int limitSwitchValue, float temp, float humidity, int gasLevel, DateTime now) {
+  //LCD Output
   static int lcdPage = 0;
   lcd.clear();
 
@@ -374,7 +530,7 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
       lcd.print(twoDigits(now.day()));
       lcd.setCursor(0, 1);
       lcd.print("Time: ");
-      lcd.print(twoDigits(now.month())); lcd.print(':');
+      lcd.print(twoDigits(now.hour())); lcd.print(':');
       lcd.print(twoDigits(now.minute())); lcd.print(':');
       lcd.print(twoDigits(now.second()));
       break;
@@ -391,11 +547,13 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
     case 2: // Temp & Humidity
       lcd.setCursor(0, 0);
       lcd.print("Temp:");
+
       if (isnan(temp)) lcd.print("Err");
       else { lcd.print(temp, 1); lcd.print("C"); }
       if (tempAlert != "") lcd.print("!");
       lcd.setCursor(0, 1);
       lcd.print("Hum:");
+
       if (isnan(humidity)) lcd.print("Err");
       else { lcd.print(humidity, 1); lcd.print("%"); }
       break;
@@ -403,8 +561,10 @@ void displayValues(float humidity, float temp, float gasLevel, int limitSwitchVa
     case 3: // Gas level
       lcd.setCursor(0, 0);
       lcd.print("Gas:");
+
       if (gasLevel == 0) lcd.print("Err");
       else { lcd.print(gasLevel, 1); lcd.print(" PPM"); }
+
       lcd.setCursor(0, 1);
       lcd.print(gasAlert);
       break;
